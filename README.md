@@ -1,18 +1,18 @@
 # whispeRT
 
-A very simple near real-time voice transcription in Python based on [OpenAI's whisper](https://openai.com/research/whisper).
+A very simple near real-time voice transcription tool in Python based on [OpenAI's whisper](https://openai.com/research/whisper).
 
 Since context is important for a transcription task, this implementation performs inference on a single sentence every 2s, but then sequentially performs inference on audio blocks with lengths of approx. 24s and 72s on the same data. It attempts to detect sentence boundaries based on the signal level dropping below a certain relative threshold.
 
 ## Usage
 ### Stand-alone
-Install requirements and PortAudio (`apt-get install libportaudio2`), run:
+Install requirements (`pip install -r requirements.txt`) and PortAudio (`apt install libportaudio2`), run
 ```
 $ python3 transcribe.py
 ```
-There are a few command-line options:
+to record from the default microphone device and print the transcription to the screen. There are a few command-line options:
 ```
-$ ./transcribe.py --help
+$ python3 transcribe.py --help
 usage: transcribe.py [-h] [--model MODEL] [--show-models] [--device DEVICE] [--show-devices] [--stdin]
                      [--save SAVE]
 
