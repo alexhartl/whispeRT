@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 
-import sys
-import os
-import numpy as np
-import whisper
-import queue
-import threading
-import collections
-import torch
 import argparse
+import collections
+import os
+import signal
+import sys
+from typing import Iterable, Optional
+
+import numpy as np
 import scipy.signal as sps
+import whisper
+import torch
 
 BLOCK_LENGTH = 0.05 # seconds
 VOL_OBSERVATION_WINDOW = 60 # seconds
@@ -22,7 +23,9 @@ MAX_STATEMENT_LENGTH = 60 # seconds
 SAMPLING_RATE = 16000
 BLOCK_SIZE = int(SAMPLING_RATE * BLOCK_LENGTH)
 
-def downsampling_needed(device):
+def is_downsampling_needed(device: int):
+    # lazily import sounddevice, which requires libportaudio.
+    # if we just want to read form stdin, we don't need this
     import sounddevice
     try:
         sounddevice.check_input_settings(device, channels=1, samplerate=SAMPLING_RATE)
@@ -30,32 +33,22 @@ def downsampling_needed(device):
         return True
     return False
 
-def yield_from_device(device, downsample_from_48k):
+def yield_from_device(device: int, downsample_from_48k: bool = False, shutdown: Optional[list] = None):
     import sounddevice
     effective_block_size = BLOCK_SIZE
     if downsample_from_48k:
         effective_block_size *= 3
     with sounddevice.InputStream(device=device, channels=1, samplerate=48000 if downsample_from_48k else SAMPLING_RATE,
                         dtype=np.int16, blocksize=effective_block_size) as stream:
-        while True:
+        while not shutdown:
             audio_block, _ = stream.read(effective_block_size)
-            yield audio_block
+            yield audio_block[:,0]
 
-def yield_from_stdin():
-        shutting_down = False
+def yield_from_stdin(shutdown: Optional[list] = None):
+        while not shutdown:
+            yield np.frombuffer(sys.stdin.buffer.read(BLOCK_SIZE*2), dtype=np.int16)
 
-        q = queue.Queue()
-        def read_data():
-            while not shutting_down:
-    #           print(f"{q.qsize()}, {len(transcription)}, {len(blocks[0])}, {len(blocks[1])}, {len(blocks[2])}")
-                q.put(sys.stdin.buffer.read(BLOCK_SIZE*2))
-
-        threading.Thread(target=read_data).start()
-
-        while not shutting_down: yield q.get()
-
-
-def yield_transcription(audio_input, model_name='tiny', downsample_from_48k=False):
+def yield_transcription(audio_input: Iterable[np.ndarray], model_name: str ='tiny', downsample_from_48k: bool = False):
     model = whisper.load_model(model_name)
     statement = []
     blocks = [ [] for _ in range(STAGES+1) ]
@@ -79,7 +72,7 @@ def yield_transcription(audio_input, model_name='tiny', downsample_from_48k=Fals
         blocks[-1].clear()
 
     for audio_block in audio_input:
-        audio_block = np.frombuffer(audio_block, dtype=np.int16).astype(np.float32) / 32768.0
+        audio_block = audio_block.astype(np.float32) / 32768.0
         assert audio_block.size == (BLOCK_SIZE*3 if downsample_from_48k else BLOCK_SIZE)
         energy = np.sum(audio_block*audio_block)
         energies.append(energy)
@@ -97,12 +90,13 @@ def yield_transcription(audio_input, model_name='tiny', downsample_from_48k=Fals
         elif len(statement) % 40 == 0:
             transcription[-1] = do_inference(np.concatenate(statement))
         yield transcription
-    yield consolidate(force=True)
+    blocks[0].append(np.concatenate(statement))
+    consolidate(force=True)
+    yield transcription
 
 def main():
-
     parser = argparse.ArgumentParser(description="Simple near real-time voice transcription based on OpenAI's whisper")
-    parser.add_argument('--model', type=str, default='tiny', help='which whisper model to use. Affects speed, performance and supported language')
+    parser.add_argument('--model', type=str, default='tiny', help='which whisper model to use. Affects speed, performance and supported languages')
     parser.add_argument('--show-models', action='store_true', help='show available models')
     parser.add_argument('--device', type=int, help='number of audio input device to use')
     parser.add_argument('--show-devices', action='store_true', help='show available audio devices')
@@ -116,12 +110,15 @@ def main():
         import sounddevice
         print(sounddevice.query_devices())
     else:
+        shutdown = []
+        signal.signal(signal.SIGINT, lambda sig,frame: shutdown.append(None))
+
         if args.stdin:
             downsample_from_48k = False
-            source = yield_from_stdin()
+            source = yield_from_stdin(shutdown)
         else:
-            downsample_from_48k = downsampling_needed(args.device)
-            source = yield_from_device(args.device, downsample_from_48k)
+            downsample_from_48k = is_downsampling_needed(args.device)
+            source = yield_from_device(args.device, downsample_from_48k, shutdown)
 
         for t in yield_transcription(source, model_name=args.model, downsample_from_48k=downsample_from_48k):
             text = ' '.join(t)
